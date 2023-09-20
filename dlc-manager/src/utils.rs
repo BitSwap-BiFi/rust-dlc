@@ -2,7 +2,10 @@
 use std::ops::Deref;
 
 use bitcoin::{consensus::Encodable, Txid};
-use dlc::{PartyParams, TxInputInfo};
+use dlc::{
+    util::{get_inputs_and_change_weight, weight_to_fee},
+    PartyParams, TxInputInfo,
+};
 use dlc_messages::{
     oracle_msgs::{OracleAnnouncement, OracleAttestation},
     FundingInput,
@@ -83,7 +86,30 @@ where
     // Add base cost of fund tx + CET / 2 and a CET output to the collateral.
     let appr_required_amount =
         own_collateral + get_half_common_fee(fee_rate)? + dlc::util::weight_to_fee(124, fee_rate)?;
-    let utxos = wallet.get_utxos_for_amount(appr_required_amount, Some(fee_rate), true)?;
+    let mut utxos =
+        wallet.get_utxos_for_amount(appr_required_amount, fee_rate, true, &change_spk)?;
+    let total_value: u64 = utxos.iter().map(|x| x.tx_out.value).sum();
+    let min_change_value = change_addr.script_pubkey().dust_value().to_sat();
+    let (inputs_weight, change_weight) = get_inputs_and_change_weight(
+        &utxos
+            .iter()
+            .map(|x| (&x.tx_out.script_pubkey, 107))
+            .collect::<Vec<_>>(),
+        &change_spk,
+    )?;
+    let inputs_fee = weight_to_fee(inputs_weight, fee_rate)?;
+    let change_fee = weight_to_fee(change_weight, fee_rate)?;
+    // We need to have a change output, if we didn't on first try, we request an amount which
+    // includes minimum value for the change output as well as the fee for it.
+    if total_value < appr_required_amount + min_change_value + inputs_fee + change_fee {
+        wallet.unreserve_utxos(&utxos)?;
+        utxos = wallet.get_utxos_for_amount(
+            appr_required_amount + min_change_value + change_fee,
+            fee_rate,
+            true,
+            &change_spk,
+        )?;
+    }
 
     let mut funding_inputs_info: Vec<FundingInputInfo> = Vec::new();
     let mut funding_tx_info: Vec<TxInputInfo> = Vec::new();

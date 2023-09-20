@@ -227,8 +227,9 @@ impl Wallet for BitcoinCoreProvider {
     fn get_utxos_for_amount(
         &self,
         amount: u64,
-        _fee_rate: Option<u64>,
+        _fee_rate: u64,
         lock_utxos: bool,
+        _change_script: &Script,
     ) -> Result<Vec<Utxo>, ManagerError> {
         let client = self.client.lock().unwrap();
         let utxo_res = client
@@ -272,6 +273,13 @@ impl Wallet for BitcoinCoreProvider {
             .unwrap()
             .import_address(address, None, Some(false))
             .map_err(rpc_err_to_manager_err)
+    }
+
+    fn unreserve_utxos(&self, utxos: &[Utxo]) -> Result<(), ManagerError> {
+        let client = self.client.lock().unwrap();
+        let outputs = utxos.iter().map(|x| x.outpoint).collect::<Vec<_>>();
+        client.unlock_unspent(&outputs).map_err(rpc_err_to_manager_err)?;
+        Ok(())
     }
 }
 

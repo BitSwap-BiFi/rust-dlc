@@ -8,7 +8,7 @@ use bitcoin::{
 use bitcoin::{Sequence, Witness};
 use secp256k1_zkp::{ecdsa::Signature, Message, PublicKey, Secp256k1, SecretKey, Signing};
 
-use crate::Error;
+use crate::{checked_add, Error};
 
 // Setting the nSequence for every input of a transaction to this value disables
 // both RBF and nLockTime usage.
@@ -250,4 +250,32 @@ pub fn validate_fee_rate(fee_rate_per_vb: u64) -> Result<(), Error> {
     }
 
     Ok(())
+}
+
+/// Computes the total weight of the given inputs and change.
+pub fn get_inputs_and_change_weight(
+    inputs: &[(&Script, usize)],
+    change_spk: &Script,
+) -> Result<(usize, usize), Error> {
+    let mut inputs_weight: usize = 0;
+
+    for w in inputs {
+        let script_weight = redeem_script_to_script_sig(w.0)
+            .len()
+            .checked_mul(4)
+            .ok_or(Error::InvalidArgument)?;
+        inputs_weight = checked_add!(
+            inputs_weight,
+            crate::TX_INPUT_BASE_WEIGHT,
+            script_weight,
+            w.1
+        )?;
+    }
+
+    // Value size + script length var_int + ouput script pubkey size
+    let change_size = change_spk.len();
+    // Change size is scaled by 4 from vBytes to weight units
+    let change_weight = change_size.checked_mul(4).ok_or(Error::InvalidArgument)?;
+
+    Ok((inputs_weight, change_weight))
 }

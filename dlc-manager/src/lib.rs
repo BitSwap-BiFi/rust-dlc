@@ -97,15 +97,23 @@ pub trait Wallet: Signer {
     /// Generate a new secret key and store it in the wallet so that it can later
     /// be retrieved.
     fn get_new_secret_key(&self) -> Result<SecretKey, Error>;
-    /// Get a set of UTXOs to fund the given amount.
+    /// Get a set of UTXOs to fund the given amount. The implementation is expected to take into
+    /// account the cost of the inputs that are selected. For the protocol to be secure, it is
+    /// required that each party has a change output on the funding transaction to be able to bump
+    /// the fee in case of network congestion. If the total value of the returned UTXO is to small
+    /// to have a change output, the library will call the method again with a higer `amount` to
+    /// ensure having a change output.
     fn get_utxos_for_amount(
         &self,
         amount: u64,
-        fee_rate: Option<u64>,
+        fee_rate: u64,
         lock_utxos: bool,
+        change_script: &Script,
     ) -> Result<Vec<Utxo>, Error>;
     /// Import the provided address.
     fn import_address(&self, address: &Address) -> Result<(), Error>;
+    /// Requests the wallet to mark the given Utxos as useable.
+    fn unreserve_utxos(&self, utxo: &[Utxo]) -> Result<(), Error>;
 }
 
 /// Blockchain trait provides access to the bitcoin blockchain.

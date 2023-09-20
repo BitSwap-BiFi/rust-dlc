@@ -1,17 +1,17 @@
-use std::rc::Rc;
+use std::sync::Mutex;
 
 use bitcoin::{Address, PackedLockTime, Script, Transaction, TxOut};
 use dlc_manager::{error::Error, Blockchain, Signer, Utxo, Wallet};
-use secp256k1_zkp::{rand::seq::SliceRandom, SecretKey};
+use secp256k1_zkp::SecretKey;
 
 use crate::mock_blockchain::MockBlockchain;
 
 pub struct MockWallet {
-    utxos: Vec<Utxo>,
+    pub utxos: Mutex<Vec<Utxo>>,
 }
 
 impl MockWallet {
-    pub fn new(blockchain: &Rc<MockBlockchain>, utxo_values: &[u64]) -> Self {
+    pub fn new(blockchain: &MockBlockchain, utxo_values: &[u64]) -> Self {
         let mut utxos = Vec::with_capacity(utxo_values.len());
 
         for utxo_value in utxo_values {
@@ -40,7 +40,9 @@ impl MockWallet {
             utxos.push(utxo);
         }
 
-        Self { utxos }
+        Self {
+            utxos: Mutex::new(utxos),
+        }
     }
 }
 
@@ -75,37 +77,36 @@ impl Wallet for MockWallet {
     fn get_utxos_for_amount(
         &self,
         amount: u64,
-        _fee_rate: Option<u64>,
-        _lock_utxos: bool,
-    ) -> Result<Vec<dlc_manager::Utxo>, Error> {
-        let mut utxo_pool = self.utxos.clone();
-        let seed = 1;
-        utxo_pool.shuffle(&mut secp256k1_zkp::rand::rngs::mock::StepRng::new(
-            seed, seed,
-        ));
-
-        let mut sum = 0;
-
-        let res = utxo_pool
-            .iter()
-            .take_while(|x| {
-                if sum >= amount {
-                    return false;
-                }
-                sum += x.tx_out.value;
-                true
-            })
-            .cloned()
-            .collect();
-
-        if sum >= amount {
-            return Ok(res);
+        fee_rate: u64,
+        lock_utxos: bool,
+        change_spk: &Script,
+    ) -> Result<Vec<Utxo>, Error> {
+        let mut utxos = self.utxos.lock().unwrap();
+        let res = simple_wallet::select_coins(&utxos, fee_rate, amount, change_spk)?;
+        if lock_utxos {
+            for s in &res {
+                utxos
+                    .iter_mut()
+                    .find(|x| x.tx_out == s.tx_out && x.outpoint == s.outpoint)
+                    .unwrap()
+                    .reserved = true;
+            }
         }
-
-        Err(Error::InvalidParameters("Not enought UTXOs".to_string()))
+        Ok(res)
     }
 
     fn import_address(&self, _address: &Address) -> Result<(), dlc_manager::error::Error> {
+        Ok(())
+    }
+
+    fn unreserve_utxos(&self, utxos: &[Utxo]) -> Result<(), dlc_manager::error::Error> {
+        let mut pool = self.utxos.lock().unwrap();
+        for s in utxos {
+            pool.iter_mut()
+                .find(|x| x.tx_out == s.tx_out && x.outpoint == s.outpoint)
+                .unwrap()
+                .reserved = false;
+        }
         Ok(())
     }
 }

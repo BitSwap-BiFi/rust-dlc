@@ -6,8 +6,7 @@ use bdk::{
     FeeRate, KeychainKind, LocalUtxo, Utxo as BdkUtxo, WeightedUtxo,
 };
 use bitcoin::{
-    hashes::Hash, Address, Network, PackedLockTime, Script, Sequence, Transaction, TxIn, TxOut,
-    Txid, Witness,
+    Address, Network, PackedLockTime, Script, Sequence, Transaction, TxIn, TxOut, Txid, Witness,
 };
 use dlc_manager::{error::Error, Blockchain, Signer, Utxo, Wallet};
 use lightning::chain::chaininterface::{ConfirmationTarget, FeeEstimator};
@@ -228,54 +227,19 @@ where
     fn get_utxos_for_amount(
         &self,
         amount: u64,
-        fee_rate: Option<u64>,
+        fee_rate: u64,
         lock_utxos: bool,
+        change_script: &Script,
     ) -> Result<Vec<Utxo>> {
         let org_utxos = self.storage.get_utxos()?;
-        let utxos = org_utxos
-            .iter()
-            .filter(|x| !x.reserved)
-            .map(|x| WeightedUtxo {
-                utxo: BdkUtxo::Local(LocalUtxo {
-                    outpoint: x.outpoint,
-                    txout: x.tx_out.clone(),
-                    keychain: KeychainKind::External,
-                    is_spent: false,
-                }),
-                satisfaction_weight: 107,
-            })
-            .collect::<Vec<_>>();
-        let coin_selection = BranchAndBoundCoinSelection::default();
-        let dummy_pubkey: PublicKey =
-            "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
-                .parse()
-                .unwrap();
-        let dummy_drain =
-            Script::new_v0_p2wpkh(&bitcoin::WPubkeyHash::hash(&dummy_pubkey.serialize()));
-        let fee_rate = FeeRate::from_sat_per_vb(fee_rate.unwrap() as f32);
-        let selection = coin_selection
-            .coin_select(self, Vec::new(), utxos, fee_rate, amount, &dummy_drain)
-            .map_err(|e| Error::WalletError(Box::new(e)))?;
-        let mut res = Vec::new();
-        for utxo in selection.selected {
-            let local_utxo = if let BdkUtxo::Local(l) = utxo {
-                l
-            } else {
-                panic!();
-            };
-            let org = org_utxos
-                .iter()
-                .find(|x| x.tx_out == local_utxo.txout && x.outpoint == local_utxo.outpoint)
-                .unwrap();
-            if lock_utxos {
-                let updated = Utxo {
+        let res = select_coins(&org_utxos, fee_rate, amount, change_script)?;
+        if lock_utxos {
+            for r in &res {
+                self.storage.upsert_utxo(&Utxo {
                     reserved: true,
-                    ..org.clone()
-                };
-                self.storage.upsert_utxo(&updated)?;
+                    ..r.clone()
+                })?;
             }
-            res.push(org.clone());
-            
         }
         Ok(res)
     }
@@ -283,13 +247,66 @@ where
     fn import_address(&self, _: &Address) -> Result<()> {
         Ok(())
     }
+
+    fn unreserve_utxos(&self, utxos: &[Utxo]) -> Result<()> {
+        for utxo in utxos {
+            self.storage
+                .unreserve_utxo(&utxo.outpoint.txid, utxo.outpoint.vout)?;
+        }
+        Ok(())
+    }
 }
 
-impl<B: Deref, W: Deref> BatchOperations for SimpleWallet<B, W>
-where
-    B::Target: WalletBlockchainProvider,
-    W::Target: WalletStorage,
-{
+pub fn select_coins(
+    utxos: &[Utxo],
+    fee_rate: u64,
+    target_amount: u64,
+    change_script: &Script,
+) -> Result<Vec<Utxo>> {
+    let weighted_utxos = utxos
+        .iter()
+        .filter(|x| !x.reserved)
+        .map(|x| WeightedUtxo {
+            utxo: BdkUtxo::Local(LocalUtxo {
+                outpoint: x.outpoint,
+                txout: x.tx_out.clone(),
+                keychain: KeychainKind::External,
+                is_spent: false,
+            }),
+            satisfaction_weight: 107,
+        })
+        .collect::<Vec<_>>();
+    let coin_selection = BranchAndBoundCoinSelection::default();
+    let fee_rate = FeeRate::from_sat_per_vb(fee_rate as f32);
+    let selection = coin_selection
+        .coin_select(
+            &DummyDB {},
+            Vec::new(),
+            weighted_utxos,
+            fee_rate,
+            target_amount,
+            &change_script,
+        )
+        .map_err(|e| Error::WalletError(Box::new(e)))?;
+    let mut res = Vec::new();
+    for utxo in selection.selected {
+        let local_utxo = if let BdkUtxo::Local(l) = utxo {
+            l
+        } else {
+            panic!();
+        };
+        let org = utxos
+            .iter()
+            .find(|x| x.tx_out == local_utxo.txout && x.outpoint == local_utxo.outpoint)
+            .unwrap();
+        res.push(org.clone());
+    }
+    Ok(res)
+}
+
+struct DummyDB {}
+
+impl BatchOperations for DummyDB {
     fn set_script_pubkey(
         &mut self,
         _: &Script,
@@ -371,11 +388,7 @@ where
     }
 }
 
-impl<B: Deref, W: Deref> Database for SimpleWallet<B, W>
-where
-    B::Target: WalletBlockchainProvider,
-    W::Target: WalletStorage,
-{
+impl Database for DummyDB {
     fn check_descriptor_checksum<BY: AsRef<[u8]>>(
         &mut self,
         _: bdk::KeychainKind,
