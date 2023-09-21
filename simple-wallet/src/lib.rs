@@ -285,7 +285,7 @@ pub fn select_coins(
             weighted_utxos,
             fee_rate,
             target_amount,
-            &change_script,
+            change_script,
         )
         .map_err(|e| Error::WalletError(Box::new(e)))?;
     let mut res = Vec::new();
